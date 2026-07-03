@@ -19,7 +19,6 @@ import {
   type HdrTransfer,
 } from "../utils/hdr.js";
 import { downloadToTemp, isHttpUrl } from "../utils/urlDownloader.js";
-import { runFfmpeg } from "../utils/runFfmpeg.js";
 import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
@@ -82,9 +81,15 @@ export interface ExtractionOptions {
   outputDir: string;
   quality?: number;
   format?: VideoFrameFormat;
+  sdrToHdrTransfer?: HdrTransfer;
 }
 
 const EXTRACT_CACHE_MIN_AGE_MS = 60 * 60 * 1000;
+const SDR_TO_HDR_COLORSPACE_FILTER = "colorspace=all=bt2020:iall=bt709:range=tv";
+
+function sdrToHdrTransformKey(transfer: HdrTransfer): string {
+  return `sdr2hdr-${transfer}`;
+}
 
 /**
  * Per-phase timings and counters emitted by `extractAllVideoFrames`.
@@ -290,6 +295,16 @@ export async function extractVideoFramesRange(
   if (!metadata.isVFR) {
     vfFilters.push(`fps=${fps}`);
   }
+  if (options.sdrToHdrTransfer) {
+    // Ordering intent: fps sampling runs BEFORE the colorspace remap so only
+    // kept frames are converted. The remap is pointwise per-frame, so the
+    // output is identical either way for the SDR (BT.709, 8-bit) inputs this
+    // flag is set for. If format=nv12 (macOS HDR-source decode) ever combines
+    // with this flag, revisit: nv12 subsampling before a BT.2020 remap is an
+    // untested interaction (today the flags are mutually exclusive — the
+    // remap only applies to SDR sources, nv12 only to HDR sources).
+    vfFilters.push(SDR_TO_HDR_COLORSPACE_FILTER);
+  }
   if (vfFilters.length > 0) args.push("-vf", vfFilters.join(","));
   if (metadata.isVFR) args.push("-fps_mode", "cfr", "-r", String(fps));
 
@@ -329,7 +344,14 @@ export async function extractVideoFramesRange(
         return;
       }
       if (code !== 0) {
-        reject(new Error(`FFmpeg exited with code ${code}: ${stderr.slice(-500)}`));
+        // With the SDR-to-HDR remap folded into this pass, a filter failure
+        // (e.g. an ffmpeg built without the colorspace filter) would otherwise
+        // surface as a generic extract error and the operator has to grep the
+        // filter chain to learn it was the HDR conversion. Attribute it.
+        const hdrPrefix = options.sdrToHdrTransfer
+          ? `SDR→HDR conversion failed (colorspace filter in extract pass, target ${options.sdrToHdrTransfer}): `
+          : "";
+        reject(new Error(`${hdrPrefix}FFmpeg exited with code ${code}: ${stderr.slice(-500)}`));
         return;
       }
 
@@ -363,75 +385,6 @@ export async function extractVideoFramesRange(
       }
     });
   });
-}
-
-/**
- * Convert an SDR (BT.709) video to BT.2020 wide-gamut so it can be composited
- * alongside HDR content without looking washed out.
- *
- * Uses FFmpeg's `colorspace` filter to remap BT.709 → BT.2020 (no real tone
- * mapping — just a primaries swap so the input fits inside the wider HDR
- * gamut), then re-tags the stream with the caller's target HDR transfer
- * function (PQ for HDR10, HLG for broadcast HDR). The output transfer must
- * match the dominant transfer of the surrounding HDR content; otherwise the
- * downstream encoder will tag the final video with the wrong curve.
- *
- * `startTime` and `duration` bound the re-encode to the segment the composition
- * actually uses. Without them a 30-minute screen recording that contributes a
- * 2-second clip was transcoded in full — a >100× waste for long sources.
- */
-async function convertSdrToHdr(
-  inputPath: string,
-  outputPath: string,
-  startTime: number,
-  duration: number,
-  targetTransfer: HdrTransfer,
-  signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout">>,
-): Promise<void> {
-  // Positive duration is required — FFmpeg's `-t 0` silently produces a 0-byte
-  // output that the downstream extractor then treats as a valid (empty) file.
-  if (duration <= 0) {
-    throw new Error(`convertSdrToHdr: duration must be positive (got ${duration})`);
-  }
-  const timeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
-
-  // smpte2084 = PQ (HDR10), arib-std-b67 = HLG.
-  const colorTrc = targetTransfer === "pq" ? "smpte2084" : "arib-std-b67";
-
-  const args = [
-    "-ss",
-    String(startTime),
-    "-i",
-    inputPath,
-    "-t",
-    String(duration),
-    "-vf",
-    "colorspace=all=bt2020:iall=bt709:range=tv",
-    "-color_primaries",
-    "bt2020",
-    "-color_trc",
-    colorTrc,
-    "-colorspace",
-    "bt2020nc",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "fast",
-    "-crf",
-    "16",
-    "-c:a",
-    "copy",
-    "-y",
-    outputPath,
-  ];
-
-  const result = await runFfmpeg(args, { signal, timeout });
-  if (!result.success) {
-    throw new Error(
-      `SDR→HDR conversion failed (exit ${result.exitCode}): ${result.stderr.slice(-300)}`,
-    );
-  }
 }
 
 /**
@@ -646,6 +599,12 @@ export async function extractAllVideoFrames(
     resolvedVideos.map(({ videoPath }) => extractMediaMetadata(videoPath)),
   );
   const videoColorSpaces = videoMetadata.map((m) => m.colorSpace);
+  // Canonical per-index record of the SDR-to-HDR transform decision. BOTH the
+  // cache key (transform discriminator) and the extraction options read from
+  // this array via the prepared work items — never set one side independently
+  // or cache lookups and written frames drift apart (the poisoning bug this
+  // field exists to fix).
+  const sdrToHdrTransfers: Array<HdrTransfer | undefined> = resolvedVideos.map(() => undefined);
   breakdown.hdrProbeMs = Date.now() - phase2ProbeStart;
 
   const hdrPreflightStart = Date.now();
@@ -665,15 +624,14 @@ export async function extractAllVideoFrames(
     // for the whole render, and any source not on that curve is normalized to
     // it. If you need both transfers, render two separate compositions.
     const targetTransfer = hdrInfo.dominantTransfer;
-    const convertDir = join(options.outputDir, "_hdr_normalized");
-    mkdirSync(convertDir, { recursive: true });
 
     for (let i = 0; i < resolvedVideos.length; i++) {
       if (signal?.aborted) break;
       const cs = videoColorSpaces[i] ?? null;
       if (!isHdrColorSpaceUtil(cs)) {
-        // SDR video in a mixed timeline — convert to the dominant HDR transfer
-        // so the encoder tags the final video correctly (PQ vs HLG).
+        // SDR video in a mixed timeline — extract through a BT.709→BT.2020
+        // colorspace filter so the encoder tags the final video correctly
+        // (PQ vs HLG) without a separate normalized intermediate.
         const entry = resolvedVideos[i];
         const metadata = videoMetadata[i];
         if (!entry || !metadata) continue;
@@ -690,45 +648,8 @@ export async function extractAllVideoFrames(
           continue;
         }
 
-        // Scope the re-encode to the segment the composition actually uses.
-        // Long sources (e.g. 30-minute screen recordings) contributing short
-        // clips were transcoded in full pre-fix — a >100× waste.
-        let segDuration = entry.video.end - entry.video.start;
-        if (!Number.isFinite(segDuration) || segDuration <= 0) {
-          const sourceRemaining = metadata.durationSeconds - entry.video.mediaStart;
-          segDuration = sourceRemaining > 0 ? sourceRemaining : metadata.durationSeconds;
-        }
-
-        const convertedPath = join(convertDir, `${entry.video.id}_hdr.mp4`);
-        try {
-          await convertSdrToHdr(
-            entry.videoPath,
-            convertedPath,
-            entry.video.mediaStart,
-            segDuration,
-            targetTransfer,
-            signal,
-            config,
-          );
-          entry.videoPath = convertedPath;
-          // The converted intermediate carries BT.2020-mapped pixels but the
-          // cache key snapshot above still describes the ORIGINAL source.
-          // Publishing converted frames under that key would poison later
-          // plain-SDR renders of the same trim, so bypass the cache for
-          // converted entries. (The follow-up transform-keyed cache change
-          // re-enables caching for these with a discriminated key.)
-          cacheKeyInputs[i] = null;
-          // Segment-scoped re-encode starts the new file at t=0, so downstream
-          // extraction must seek from 0, not the original mediaStart. Shallow-copy
-          // to avoid mutating the caller's VideoElement.
-          entry.video = { ...entry.video, mediaStart: 0 };
-          breakdown.hdrPreflightCount += 1;
-        } catch (err) {
-          errors.push({
-            videoId: entry.video.id,
-            error: `SDR→HDR conversion failed: ${err instanceof Error ? err.message : String(err)}`,
-          });
-        }
+        sdrToHdrTransfers[i] = targetTransfer;
+        breakdown.hdrPreflightCount += 1;
       }
     }
   }
@@ -747,6 +668,7 @@ export async function extractAllVideoFrames(
         // with the other parallel arrays so Phase 3's `cacheKeyInputs[i]`
         // lookup doesn't point at a stale slot after the splice.
         cacheKeyInputs.splice(i, 1);
+        sdrToHdrTransfers.splice(i, 1);
       }
     }
   }
@@ -786,6 +708,7 @@ export async function extractAllVideoFrames(
     i: number,
     metadata: VideoMetadata,
     cacheFormat: CacheFrameFormat,
+    sdrToHdrTransfer?: HdrTransfer,
   ): Promise<ExtractedFrames | null> {
     if (!cacheRootDir) return null;
     const keyInput = cacheKeyInputs[i];
@@ -804,6 +727,7 @@ export async function extractAllVideoFrames(
       duration: keyDuration,
       fps: options.fps,
       format: cacheFormat,
+      transform: sdrToHdrTransfer ? sdrToHdrTransformKey(sdrToHdrTransfer) : undefined,
     });
 
     if (lookup.hit) {
@@ -827,7 +751,7 @@ export async function extractAllVideoFrames(
       video.id,
       video.mediaStart,
       videoDuration,
-      { ...options, format: cacheFormat },
+      { ...options, format: cacheFormat, sdrToHdrTransfer },
       signal,
       config,
       partialDir,
@@ -859,6 +783,7 @@ export async function extractAllVideoFrames(
     metadata: VideoMetadata;
     videoDuration: number;
     format: CacheFrameFormat;
+    sdrToHdrTransfer?: HdrTransfer;
     dedupeKey: string;
   };
 
@@ -883,7 +808,8 @@ export async function extractAllVideoFrames(
         }
 
         const format = resolveFrameFormat(metadata, options.format);
-        const dedupeKey = `${videoPath}\0${video.mediaStart}\0${videoDuration}\0${options.fps}\0${format}`;
+        const sdrToHdrTransfer = sdrToHdrTransfers[index];
+        const dedupeKey = `${videoPath}\0${video.mediaStart}\0${videoDuration}\0${options.fps}\0${format}\0${sdrToHdrTransfer ?? ""}`;
 
         return {
           work: {
@@ -893,6 +819,7 @@ export async function extractAllVideoFrames(
             metadata,
             videoDuration,
             format,
+            sdrToHdrTransfer,
             dedupeKey,
           },
         };
@@ -939,6 +866,7 @@ export async function extractAllVideoFrames(
             work.index,
             work.metadata,
             work.format,
+            work.sdrToHdrTransfer,
           );
           if (cached) return cached;
 
@@ -947,7 +875,7 @@ export async function extractAllVideoFrames(
             work.video.id,
             work.video.mediaStart,
             work.videoDuration,
-            { ...options, format: work.format },
+            { ...options, format: work.format, sdrToHdrTransfer: work.sdrToHdrTransfer },
             signal,
             config,
           );
