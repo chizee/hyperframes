@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -27,6 +28,13 @@ import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useFileManagerContext } from "../contexts/FileManagerContext";
 import { useDomEditContext } from "../contexts/DomEditContext";
 import { usePlayerStore } from "../player";
+import { waitForMediaJob } from "./studioMediaJobs";
+import {
+  applyColorGradingScopeUpdate,
+  EMPTY_COLOR_GRADING_SCOPE_RESULT,
+  type ColorGradingScope,
+} from "./studioColorGradingScope";
+import type { BackgroundRemovalProgress } from "./editor/propertyPanelTypes";
 
 const MIN_INSPECTOR_SPLIT_PERCENT = 20;
 const MAX_INSPECTOR_SPLIT_PERCENT = 75;
@@ -82,6 +90,7 @@ export function StudioRightPanel({
     previewIframeRef,
     projectId,
     activeCompPath,
+    showToast,
     compositionDimensions,
     waitForPendingDomEditSaves,
     renderQueue,
@@ -136,8 +145,10 @@ export function StudioRightPanel({
     projectDir,
     handleImportFiles,
     handleImportFonts,
+    refreshFileTree,
     readProjectFile,
     writeProjectFile,
+    fileTree,
   } = useFileManagerContext();
 
   // Discrete ops (toggle, reorder, add/delete, hotspot): persist immediately,
@@ -172,6 +183,14 @@ export function StudioRightPanel({
     startPercent: number;
     height: number;
   } | null>(null);
+  const backgroundRemovalAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      backgroundRemovalAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const renderJobs = renderQueue.jobs as RenderJob[];
   const inspectorTabActive = rightPanelTab === "design" || rightPanelTab === "layers";
@@ -233,6 +252,90 @@ export function StudioRightPanel({
     splitDragRef.current = null;
   }, []);
 
+  const handleApplyColorGradingScope = useCallback(
+    async (scope: ColorGradingScope, value: string | null) =>
+      applyColorGradingScopeUpdate({
+        scope,
+        value,
+        selectedSourceFile: domEditSelection?.sourceFile || activeCompPath || "index.html",
+        fileTree,
+        projectId,
+        domEditSaveTimestampRef,
+        waitForPendingDomEditSaves,
+        readProjectFile,
+        writeProjectFile,
+        recordEdit,
+        reloadPreview,
+        showToast,
+      }).catch((error) => {
+        showToast(
+          `Couldn't apply color grading: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+        return EMPTY_COLOR_GRADING_SCOPE_RESULT;
+      }),
+    [
+      activeCompPath,
+      domEditSaveTimestampRef,
+      domEditSelection?.sourceFile,
+      fileTree,
+      projectId,
+      readProjectFile,
+      recordEdit,
+      reloadPreview,
+      showToast,
+      waitForPendingDomEditSaves,
+      writeProjectFile,
+    ],
+  );
+
+  const handleRemoveBackground = useCallback(
+    // fallow-ignore-next-line complexity
+    async (
+      inputPath: string,
+      options: {
+        createBackgroundPlate?: boolean;
+        quality?: "fast" | "balanced" | "best";
+        onProgress?: (progress: BackgroundRemovalProgress) => void;
+      },
+    ) => {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/media/remove-background`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            inputPath,
+            createBackgroundPlate: options.createBackgroundPlate === true,
+            quality: options.quality ?? "balanced",
+          }),
+        },
+      );
+      const data = (await response.json().catch(() => ({}))) as {
+        jobId?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.jobId) {
+        throw new Error(data.error || `Background removal failed (${response.status})`);
+      }
+      showToast("Removing background...", "info");
+      backgroundRemovalAbortRef.current?.abort();
+      const controller = new AbortController();
+      backgroundRemovalAbortRef.current = controller;
+      try {
+        const result = await waitForMediaJob(data.jobId, options.onProgress, controller.signal);
+        await refreshFileTree();
+        showToast(`Created transparent asset: ${result.outputPath.split("/").pop()}`, "info");
+        return result;
+      } finally {
+        if (backgroundRemovalAbortRef.current === controller) {
+          backgroundRemovalAbortRef.current = null;
+        }
+      }
+    },
+    [projectId, refreshFileTree, showToast],
+  );
+
   const propertyPanel = (
     <PropertyPanel
       projectId={projectId}
@@ -246,7 +349,9 @@ export function StudioRightPanel({
       onSetStyle={handleDomStyleCommit}
       onSetAttribute={handleDomAttributeCommit}
       onSetAttributeLive={handleDomAttributeLiveCommit}
+      onApplyColorGradingScope={handleApplyColorGradingScope}
       onSetHtmlAttribute={handleDomHtmlAttributeCommit}
+      onRemoveBackground={handleRemoveBackground}
       onSetManualOffset={handleDomPathOffsetCommit}
       onSetManualSize={handleDomBoxSizeCommit}
       onSetManualRotation={handleDomRotationCommit}
@@ -325,14 +430,14 @@ export function StudioRightPanel({
         <div className="h-[52px] w-px bg-white/12 transition-colors group-hover:bg-white/18 group-active:bg-white/24" />
       </div>
       <div
-        className="flex flex-col border-l border-neutral-800 bg-neutral-900 flex-shrink-0"
+        className="flex min-w-0 flex-shrink-0 flex-col overflow-hidden border-l border-neutral-800 bg-neutral-900"
         style={{ width: rightWidth }}
       >
         {captionEditMode ? (
           <CaptionPropertyPanel iframeRef={previewIframeRef} />
         ) : (
           <>
-            <div className="flex items-center gap-1 border-b border-neutral-800 px-3 py-2">
+            <div className="flex min-w-0 items-center gap-1 overflow-hidden border-b border-neutral-800 px-3 py-2">
               {STUDIO_INSPECTOR_PANELS_ENABLED && (
                 <>
                   <Tooltip label="Element styles and properties" side="bottom">
@@ -390,7 +495,7 @@ export function StudioRightPanel({
                 </button>
               </Tooltip>
             </div>
-            <div className="min-h-0 flex-1">
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
               {rightPanelTab === "block-params" && activeBlockParams ? (
                 <BlockParamsPanel
                   blockName={activeBlockParams.blockName}
@@ -406,7 +511,7 @@ export function StudioRightPanel({
                   onPersistNotes={onPersistSlideshowNotes}
                 />
               ) : layersPaneOpen && designPaneOpen ? (
-                <div ref={splitContainerRef} className="flex h-full min-h-0 flex-col">
+                <div ref={splitContainerRef} className="flex h-full min-h-0 min-w-0 flex-col">
                   <div
                     className="min-h-[120px] overflow-hidden"
                     style={{ flexBasis: `${layersPanePercent}%`, flexShrink: 0 }}
