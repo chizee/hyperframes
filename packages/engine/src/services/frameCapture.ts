@@ -501,18 +501,6 @@ async function initDrawElementOrTransparentBackground(
         "hint forced screenshot capture (e.g. raw requestAnimationFrame composition).",
     );
   }
-  // Retract the per-page autoAlpha rewrite flag when a runtime gate routes the
-  // session to screenshot mode. evaluateOnNewDocument already fired; a follow-up
-  // evaluate overrides it in the live page context so hideTransparentAutoAlpha-
-  // Targets does not hide elements on the fallback screenshot render
-  // (up to 21 dB damage if not retracted, A/B proven 2026-06-12).
-  async function retractAutoAlphaFlag(): Promise<void> {
-    await page.evaluate(() => {
-      (
-        window as Window & { __HF_FAST_CAPTURE_AUTOALPHA__?: boolean }
-      ).__HF_FAST_CAPTURE_AUTOALPHA__ = false;
-    });
-  }
   if (useDrawElement) {
     session.isSwiftShader = await detectSwiftShader(page);
     const transparent = session.options.format === "png";
@@ -521,7 +509,6 @@ async function initDrawElementOrTransparentBackground(
       if (transparent) {
         await initTransparentBackground(session.page);
       }
-      await retractAutoAlphaFlag();
       // Static-frame dedup is capture-mode-independent (the serial path reuses
       // lastFrameBuffer regardless of how the frame was captured) and lossless
       // (anchor-verified). A comp only reaches THIS fallback with useDrawElement=true
@@ -646,14 +633,10 @@ async function initDrawElementOrTransparentBackground(
       // screenshots would capture black <video> boxes, and once the canvas is
       // injected they can never be retaken. The capture stage completes the
       // init after prepareCaptureSessionForReuse attaches the injector.
-      // Retract the autoAlpha rewrite flag while deferred — if no path ever
-      // completes the init (e.g. the disk path takes over), the session
-      // captures via screenshot, where the armed flag causes measured damage.
       if (!session.onBeforeCapture && !forceDE) {
         const hasVideos = await page.evaluate(() => document.querySelector("video") !== null);
         if (hasVideos) {
           session.deInitDeferred = true;
-          await retractAutoAlphaFlag();
           logInitPhase("drawElement init deferred: video comp awaiting frame injector");
           return;
         }
@@ -721,15 +704,10 @@ async function finalizeDrawElementInit(
  * Complete a deferred drawElement init (see CaptureSession.deInitDeferred).
  * Call after prepareCaptureSessionForReuse has attached the video-frame
  * injector; no-op when the session is not deferred or still has no injector.
- * Re-asserts the autoAlpha rewrite flag retracted at deferral time.
  */
 export async function completeDeferredDrawElementInit(session: CaptureSession): Promise<void> {
   if (!session.deInitDeferred || !session.onBeforeCapture) return;
   const page = session.page;
-  await page.evaluate(() => {
-    (window as Window & { __HF_FAST_CAPTURE_AUTOALPHA__?: boolean }).__HF_FAST_CAPTURE_AUTOALPHA__ =
-      true;
-  });
   const logInitPhase = (phase: string) =>
     console.log(`[initSession:${session.captureMode}] ${phase} (deferred drawElement init)`);
   await finalizeDrawElementInit(session, page, logInitPhase, {
@@ -844,31 +822,24 @@ export async function createCaptureSession(
   if (useDrawElement) {
     await page.evaluateOnNewDocument(instrumentAcceleratedCanvases);
   }
-  // Signal the producer's GSAP stub to rewrite `opacity` → `autoAlpha` in tween
-  // vars (stacked opacity-0 caption layers break drawElementImage capture).
-  //
-  // DEFAULT OFF (opt in with HF_FAST_CAPTURE_AUTOALPHA=true). The rewrite is baked
-  // at tween-creation (page load) and `retractAutoAlphaFlag` (flag-only) can't
-  // un-bake it: GSAP autoAlpha sets visibility:hidden under seek capture and renders
-  // ~28 dB below a clean opacity baseline (corpus eval 2026-06-16, e.g.
-  // 05f22830/06167790: autoAlpha-off = ∞, autoAlpha-on = 28 dB). The rewrite was a
-  // workaround for the stacked-fade opacity-layer drop (crbug 521861819), now fixed
-  // in Chrome 151 — so it damages more than it fixes. Re-enable per render only if a
-  // drawElement comp shows transparent-layer drop on the pinned 151 floor.
-  if (useDrawElement && process.env.HF_FAST_CAPTURE_AUTOALPHA === "true") {
-    await page.evaluateOnNewDocument(() => {
-      (
-        window as Window & { __HF_FAST_CAPTURE_AUTOALPHA__?: boolean }
-      ).__HF_FAST_CAPTURE_AUTOALPHA__ = true;
-    });
+  // The opacity → autoAlpha tween rewrite was RETIRED with the requestPaint
+  // contract adoption (crbug 529829538 closed WAI): a requestPaint-driven
+  // paint refreshes nested opacity layers natively, and the rewrite itself
+  // measured ~28 dB of damage on comps whose fades it touched. Warn instead
+  // of silently ignoring the old escape hatch.
+  if (process.env.HF_FAST_CAPTURE_AUTOALPHA !== undefined) {
+    console.warn(
+      "[engine] HF_FAST_CAPTURE_AUTOALPHA is retired and ignored — the requestPaint " +
+        "paint contract captures animated opacity natively (see drawElementService.ts).",
+    );
   }
-  // Re-apply the captured root's own computed opacity to the 2D context:
-  // drawElementImage does not reflect post-paint changes to compositor-applied
-  // properties on the captured element itself (the root's opacity is applied by
-  // its parent at composite time, never baked into its content snapshot), so an
-  // animated root fade renders at full opacity. captureDrawElementFrame corrects
-  // this by the ratio current/base opacity (no-op for a static root). On by
-  // default; disable with HF_FAST_CAPTURE_ROOT_PROPS=false.
+  // Re-apply the captured root's own compositor-applied props to the 2D
+  // context where the snapshot does not carry them (see the correction
+  // comment in drawElementService.ts drawAndEncode: transform always —
+  // never baked, verified under the requestPaint contract 2026-07-07;
+  // opacity ratio only on non-requestPaint paints, where the snapshot holds
+  // the load-time value). On by default; disable with
+  // HF_FAST_CAPTURE_ROOT_PROPS=false.
   if (useDrawElement && process.env.HF_FAST_CAPTURE_ROOT_PROPS !== "false") {
     await page.evaluateOnNewDocument(() => {
       (window as unknown as { __HF_ROOT_PROPS__?: boolean }).__HF_ROOT_PROPS__ = true;
