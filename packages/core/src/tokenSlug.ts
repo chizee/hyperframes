@@ -8,10 +8,15 @@
  */
 
 export function slugify(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const collapsed = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  // Character-scan trim of leading/trailing "-" instead of /^-+|-+$/:
+  // CodeQL flags the alternated anchored regex as polynomial ReDoS on
+  // adversarial inputs (js/polynomial-redos).
+  let start = 0;
+  let end = collapsed.length;
+  while (start < end && collapsed[start] === "-") start++;
+  while (end > start && collapsed[end - 1] === "-") end--;
+  const slug = collapsed.slice(start, end);
   return slug.length > 0 ? slug : "node";
 }
 

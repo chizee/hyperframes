@@ -19,6 +19,8 @@
  *
  *     const { title = "Untitled", theme = "light" } = getVariables<MyVars>();
  */
+import { cssVariableName, detectSlugCollisions } from "../tokenSlug";
+
 export function getVariables<
   T extends Record<string, unknown> = Record<string, unknown>,
 >(): Partial<T> {
@@ -27,11 +29,18 @@ export function getVariables<
   // Same collection the CSS-variable injection uses: <html> first, then any
   // composition element carrying the attribute (later declarers win), then
   // render-time overrides.
-  const declaredDefaults = readDeclaredDefaults(document.documentElement);
+  const declarers = new Set<Element>();
+  if (document.documentElement?.hasAttribute("data-composition-variables")) {
+    declarers.add(document.documentElement);
+  }
   for (const el of Array.from(document.querySelectorAll("[data-composition-variables]"))) {
+    declarers.add(el);
+  }
+  const declaredDefaults: Record<string, unknown> = {};
+  for (const el of declarers) {
     Object.assign(declaredDefaults, readDeclaredDefaults(el));
   }
-  const overrides = readOverrides();
+  const overrides = readRenderOverrides();
 
   return { ...declaredDefaults, ...overrides } as Partial<T>;
 }
@@ -64,8 +73,6 @@ export function readDeclaredDefaults(root: Element | null): Record<string, unkno
   }
   return out;
 }
-
-import { cssVariableName, detectSlugCollisions } from "../tokenSlug";
 
 const APPLIED_VARS_ATTR = "data-hf-css-vars";
 
@@ -125,7 +132,7 @@ export function injectCompositionCssVariables(doc: Document): void {
   for (const el of Array.from(doc.querySelectorAll("[data-composition-variables]"))) {
     declarers.add(el);
   }
-  const overrides = readOverrides();
+  const overrides = readRenderOverrides();
   const allIds: string[] = [];
   for (const el of declarers) {
     allIds.push(...applyDeclaredForElement(el, overrides, doc.defaultView));
@@ -181,10 +188,6 @@ export function parseHostVariableValues(host: Element): Record<string, unknown> 
 
 /** Render-time variable overrides (`hyperframes render --variables`). */
 export function readRenderOverrides(): Record<string, unknown> {
-  return readOverrides();
-}
-
-function readOverrides(): Record<string, unknown> {
   if (typeof window === "undefined") return {};
   const raw = (window as Window & { __hfVariables?: unknown }).__hfVariables;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
