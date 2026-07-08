@@ -300,6 +300,12 @@ async function captureFrameRange(
   // session's encode worker initialized (drawElement mode) and frames stream
   // back via onFrameBuffer; the ordered writer's waitForFrame provides the
   // cross-worker backpressure (each worker runs at most `stride` frames ahead).
+  // NOTE: this branch fires for any stride, but production only ever reaches
+  // it via HF_DE_PARALLEL_STREAM, which always uses interleaved distribution
+  // (stride = workerCount). The stride=1 (contiguous) path through here is
+  // validation-only — exercised by tests wiring onFrameBuffer with a
+  // contiguous multi-worker task, not a shape real renders take. Don't
+  // "simplify" the flag checks around this without accounting for that.
   if (onFrameBuffer && session.workerEncodeEnabled) {
     const dbg = process.env.HF_DE_PAR_DEBUG === "1";
     const dbgT0 = Date.now();
@@ -312,6 +318,12 @@ async function captureFrameRange(
         console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} start`);
       }
       const { encodeResult } = await captureFrameToBufferPipelined(session, i - outputOffset, time);
+      // Marks the promise "handled" for Node's unhandled-rejection detector
+      // without affecting the real `await prev.encodeResult` below — if a
+      // later iteration throws (abort, downstream writeFrame failure) before
+      // this frame's encode is drained, it's abandoned rather than awaited,
+      // and would otherwise surface as an unhandled rejection during teardown.
+      encodeResult.catch(() => {});
       if (dbg && i < task.startFrame + dbgWin) {
         console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} kicked`);
       }
@@ -458,7 +470,15 @@ export async function executeParallelCapture(
   onFrameBuffer?: (frameIndex: number, buffer: Buffer, session: CaptureSession) => Promise<void>,
   config?: Partial<EngineConfig>,
 ): Promise<WorkerResult[]> {
-  const totalFrames = tasks.reduce((sum, t) => sum + (t.endFrame - t.startFrame), 0);
+  // `endFrame - startFrame` is the correct per-task frame count for contiguous
+  // tasks (stride 1), but for interleaved tasks (stride = workerCount) each
+  // task spans nearly the full range while only actually capturing 1/stride
+  // of it — dividing by stride here matches the loop in `captureFrameRange`
+  // (`i += stride`) so progress doesn't plateau at ~1/workerCount.
+  const totalFrames = tasks.reduce(
+    (sum, t) => sum + Math.ceil((t.endFrame - t.startFrame) / (t.frameStride ?? 1)),
+    0,
+  );
   const workerProgress = new Map<number, number>();
 
   for (const task of tasks) workerProgress.set(task.workerId, 0);
