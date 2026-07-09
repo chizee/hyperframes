@@ -154,7 +154,7 @@ export function applyPositionEditToElement(el: HTMLElement, opts?: { force?: boo
  * Apply all pending position edits in the document. Returns the number of
  * elements updated.
  */
-export function applyPositionEdits(doc: Document, opts?: { force?: boolean }): number {
+export function applyPositionEdits(doc: Document): number {
   const marked = doc.querySelectorAll(`[${EDIT_BASE_X_ATTR}], [${EDIT_BASE_Y_ATTR}]`);
   // Not `instanceof HTMLElement`: `doc` is frequently an iframe's document (the
   // SDK's edit preview, a host embedding a composition), and its elements are
@@ -170,7 +170,7 @@ export function applyPositionEdits(doc: Document, opts?: { force?: boolean }): n
       ? el instanceof RealmHTMLElement
       : typeof (el as HTMLElement).style?.setProperty === "function";
     if (!isStylable) continue;
-    applyPositionEditToElement(el as HTMLElement, opts);
+    applyPositionEditToElement(el as HTMLElement);
     applied += 1;
   }
   return applied;
@@ -189,7 +189,7 @@ export function installPositionEditsSeekReapply(win: Window & typeof globalThis)
   const target = win as SeekWindow;
   const reapply = (): void => {
     try {
-      applyPositionEdits(target.document, { force: true });
+      applyPositionEdits(target.document);
     } catch {
       // A position edit must never break the render seek path.
     }

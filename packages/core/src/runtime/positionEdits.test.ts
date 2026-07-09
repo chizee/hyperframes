@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   EDIT_BASE_X_ATTR,
   EDIT_BASE_Y_ATTR,
@@ -209,6 +209,28 @@ describe("installPositionEditsSeekReapply", () => {
     // @ts-expect-error test global
     delete window.__player;
     el.remove();
+  });
+
+  it("wraps __hf.seek and a seek function assigned after installation", () => {
+    vi.useFakeTimers();
+    const el = makeElement({ "data-x": "8", "data-y": "0", "data-hf-edit-base-x": "0" });
+    const calls: number[] = [];
+    // @ts-expect-error test global
+    window.__hf = {};
+
+    installPositionEditsSeekReapply(window as Window & typeof globalThis);
+    // @ts-expect-error test global
+    window.__hf.seek = (time: number) => calls.push(time);
+    vi.advanceTimersByTime(50);
+    // @ts-expect-error test global
+    window.__hf.seek(3);
+
+    expect(calls).toEqual([3]);
+    expect(el.style.getPropertyValue("translate")).toBe("8px 0px");
+    // @ts-expect-error test global
+    delete window.__hf;
+    el.remove();
+    vi.useRealTimers();
   });
 
   it("does not throw when neither seek global exists", () => {
