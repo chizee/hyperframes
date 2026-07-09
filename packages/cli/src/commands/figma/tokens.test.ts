@@ -15,6 +15,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 function client(overrides: Partial<FigmaClient>): FigmaClient {
   return {
     renderNode: () => Promise.reject(new Error("unused")),
+    renderNodes: () => Promise.reject(new Error("unused")),
     imageFills: () => Promise.resolve(new Map()),
     variables: () =>
       Promise.resolve({
