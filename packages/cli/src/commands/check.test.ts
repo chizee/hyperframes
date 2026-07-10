@@ -1112,6 +1112,52 @@ describe("check pipeline", () => {
   });
 });
 
+describe("contrast persistence", () => {
+  it("demotes a single-sample contrast failure to warning but gates held failures", async () => {
+    const driver = fakeDriver({
+      collectContrast: vi.fn(async (time: number) => ({
+        entries: [
+          // #hero fails at every sample: held, stays an error.
+          contrastEntry({ time, selector: "#hero" }),
+          // #entrance fails only at the first sample (mid-entrance): demoted.
+          ...(time < 1
+            ? [contrastEntry({ time, selector: "#entrance", text: "Fading in" })]
+            : [
+                contrastEntry({
+                  time,
+                  selector: "#entrance",
+                  text: "Fading in",
+                  ratio: 8,
+                  wcagAA: true,
+                }),
+              ]),
+        ],
+        pngBase64: PNG_BASE64,
+      })),
+    });
+    const { report } = await runScenario(driver);
+
+    const bySelector = new Map(
+      report.contrast.findings.map((finding) => [finding.selector, finding.severity]),
+    );
+    expect(bySelector.get("#hero")).toBe("error");
+    expect(bySelector.get("#entrance")).toBe("warning");
+    expect(checkExitCode(report)).toBe(1);
+  });
+
+  it("keeps full severity when only one sample time exists", async () => {
+    const driver = fakeDriver({
+      collectContrast: vi.fn(async (time: number) => ({
+        entries: [contrastEntry({ time })],
+        pngBase64: PNG_BASE64,
+      })),
+    });
+    const { report } = await runScenario(driver, { samples: 1, at: [2] });
+
+    expect(report.contrast.findings[0]?.severity).toBe("error");
+  });
+});
+
 describe("check report telemetry", () => {
   it("reports one clean run with every gate and sampled-point count", async () => {
     const motion: MotionSpecResolution = {

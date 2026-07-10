@@ -456,6 +456,84 @@ describe("contrast-audit.browser clip-path visibility", () => {
 
     expect(await runContrastAudit()).toEqual([]);
   });
+
+  it("excludes data-layout-ignore set dressing from contrast reports", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div data-layout-ignore>
+          <div id="rail-label">SHAPE</div>
+        </div>
+        <div id="headline">Readable copy</div>
+      </div>
+    `;
+
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "rgb(30, 30, 42)",
+          fontSize: "32px",
+          fontWeight: "400",
+          clipPath: "none",
+        }) as unknown as CSSStyleDeclaration,
+    );
+    for (const id of ["rail-label", "headline"]) {
+      vi.spyOn(document.getElementById(id)!, "getBoundingClientRect").mockReturnValue(
+        rect({ left: 100, top: id === "headline" ? 200 : 100, width: 400, height: 40 }),
+      );
+    }
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () =>
+      null;
+
+    installContrastScript();
+
+    const entries = await runContrastAudit();
+    const selectors = entries.map((entry) => entry.selector);
+    expect(selectors).toContain("#headline");
+    expect(selectors).not.toContain("#rail-label");
+  });
+
+  it("excludes text that has left the canvas from contrast reports", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="exited">You</div>
+        <div id="headline">Readable copy</div>
+      </div>
+    `;
+
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "rgb(255, 255, 255)",
+          fontSize: "32px",
+          fontWeight: "400",
+          clipPath: "none",
+        }) as unknown as CSSStyleDeclaration,
+    );
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 640 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 360 });
+    // The cursor-exit shape: element parked far past the top-left corner.
+    vi.spyOn(document.getElementById("exited")!, "getBoundingClientRect").mockReturnValue(
+      rect({ left: -1420, top: -500, width: 60, height: 24 }),
+    );
+    vi.spyOn(document.getElementById("headline")!, "getBoundingClientRect").mockReturnValue(
+      rect({ left: 100, top: 200, width: 400, height: 40 }),
+    );
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () =>
+      null;
+
+    installContrastScript();
+
+    const entries = await runContrastAudit();
+    const selectors = entries.map((entry) => entry.selector);
+    expect(selectors).toContain("#headline");
+    expect(selectors).not.toContain("#exited");
+  });
 });
 
 describe("contrast-audit.browser background sampling", () => {

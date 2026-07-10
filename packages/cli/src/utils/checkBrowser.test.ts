@@ -51,6 +51,18 @@ afterEach(() => {
   Reflect.deleteProperty(window, "__contrastAuditRestoreIfPending");
 });
 
+function installSessionMock(page: ReturnType<typeof fakePage>): void {
+  const browser = Object.assign(Object.create(null), {
+    close: vi.fn(async () => undefined),
+  });
+  vi.mocked(openSettledCompositionPage).mockImplementation(
+    async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
+      await options.beforeNavigate?.(page);
+      return { page, browser, renderReadyTimedOut: false };
+    },
+  );
+}
+
 it("carries raw browser geometry through the page driver and pipeline", async () => {
   vi.spyOn(Date, "now")
     .mockReturnValueOnce(100)
@@ -68,15 +80,7 @@ it("carries raw browser geometry through the page driver and pipeline", async ()
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 360 });
   installRects();
   const page = fakePage();
-  const browser = Object.assign(Object.create(null), {
-    close: vi.fn(async () => undefined),
-  });
-  vi.mocked(openSettledCompositionPage).mockImplementation(
-    async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
-      await options.beforeNavigate?.(page);
-      return { page, browser, renderReadyTimedOut: false };
-    },
-  );
+  installSessionMock(page);
 
   const result = await runBrowserCheck(
     PROJECT,
@@ -184,15 +188,7 @@ it("round-trips the browser script's raw contrast candidates back into finish", 
     }
   });
   page.screenshot = vi.fn(async () => "c3R1Yg==");
-  const browser = Object.assign(Object.create(null), {
-    close: vi.fn(async () => undefined),
-  });
-  vi.mocked(openSettledCompositionPage).mockImplementation(
-    async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
-      await options.beforeNavigate?.(page);
-      return { page, browser, renderReadyTimedOut: false };
-    },
-  );
+  installSessionMock(page);
 
   await runBrowserCheck(
     PROJECT,

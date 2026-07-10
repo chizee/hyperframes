@@ -632,21 +632,45 @@ export function checkExitCode(report: CheckReport): 0 | 1 {
   return report.ok ? 0 : 1;
 }
 
+// Same persistence rule the layout findings follow: a failure observed at a
+// single contrast sample is usually text caught mid-entrance/exit (its real
+// background not painted yet — white-on-white at exactly 1.0 is the classic
+// shape), so it demotes to warning. A failure HELD at 2+ samples for the same
+// element is a real, gating defect. Single-sample sweeps can't distinguish,
+// so they keep full severity.
+function contrastFailureHeld(
+  entries: ContrastAuditEntry[],
+): (entry: ContrastAuditEntry) => boolean {
+  const sampledTimes = new Set(entries.map((entry) => entry.time)).size;
+  const failureSamples = new Map<string, Set<number>>();
+  for (const entry of entries) {
+    if (entry.wcagAA) continue;
+    const key = `${entry.selector}|${entry.text}`;
+    const times = failureSamples.get(key) ?? new Set<number>();
+    times.add(entry.time);
+    failureSamples.set(key, times);
+  }
+  return (entry) =>
+    sampledTimes < 2 || (failureSamples.get(`${entry.selector}|${entry.text}`)?.size ?? 0) >= 2;
+}
+
 function buildContrastResults(entries: ContrastAuditEntry[]): {
   findings: CheckContrastFinding[];
   passed: number;
 } {
   const findings: CheckContrastFinding[] = [];
   let passed = 0;
+  const isHeld = contrastFailureHeld(entries);
   for (const entry of entries) {
     if (entry.wcagAA) {
       passed += 1;
       continue;
     }
+    const held = isHeld(entry);
     const requiredRatio = requiredContrastRatio(entry.large);
     findings.push({
       code: "contrast_aa_failure",
-      severity: "error",
+      severity: held ? "error" : "warning",
       message: `Contrast is ${entry.ratio}:1; WCAG AA requires ${requiredRatio}:1.`,
       text: entry.text,
       fg: entry.fg,

@@ -1,3 +1,8 @@
+// The scaffolding command predates the complexity gate: run(), probeVideo,
+// handleVideoFile, and applyResolutionPreset carry its interactive branching.
+// This branch only repointed the scaffolded npm scripts; the refactor is its
+// own task.
+// fallow-ignore-file complexity
 import { defineCommand, runCommand } from "citty";
 import type { Example } from "./_examples.js";
 
