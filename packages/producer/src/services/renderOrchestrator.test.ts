@@ -1668,6 +1668,7 @@ describe("resolveInversionRetryPlan (self-verify retry rollback)", () => {
         cfg,
         outputFormat: "mp4",
         durationSeconds: 80,
+        isMemoryExhaustion: false,
       }),
     ).toBe(null);
     expect(
@@ -1677,6 +1678,7 @@ describe("resolveInversionRetryPlan (self-verify retry rollback)", () => {
         cfg,
         outputFormat: "mp4",
         durationSeconds: 80,
+        isMemoryExhaustion: false,
       }),
     ).toBe(null);
   });
@@ -1688,6 +1690,7 @@ describe("resolveInversionRetryPlan (self-verify retry rollback)", () => {
       cfg,
       outputFormat: "mp4",
       durationSeconds: 80,
+      isMemoryExhaustion: false,
     });
     expect(plan).toEqual({
       workerCount: 5,
@@ -1705,6 +1708,23 @@ describe("resolveInversionRetryPlan (self-verify retry rollback)", () => {
       cfg,
       outputFormat: "mp4",
       durationSeconds: 80,
+      isMemoryExhaustion: false,
+    });
+    expect(plan).toEqual({
+      workerCount: 1,
+      useStreamingEncode: true,
+      deWorkerInversion: "reverted",
+    });
+  });
+
+  it("drops to a single worker on OOM regardless of the pre-inversion count (the actual memory remedy)", () => {
+    const plan = resolveInversionRetryPlan({
+      deWorkerInversion: "inverted",
+      preInversionWorkerCount: 5,
+      cfg,
+      outputFormat: "mp4",
+      durationSeconds: 80,
+      isMemoryExhaustion: true,
     });
     expect(plan).toEqual({
       workerCount: 1,
@@ -1805,6 +1825,7 @@ describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
         cfg,
         outputFormat: "mp4",
         durationSeconds: 80,
+        isMemoryExhaustion: false,
       }),
     ).toBe(null);
     expect(
@@ -1814,6 +1835,7 @@ describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
         cfg,
         outputFormat: "mp4",
         durationSeconds: 80,
+        isMemoryExhaustion: false,
       }),
     ).toBe(null);
   });
@@ -1825,6 +1847,7 @@ describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
       cfg,
       outputFormat: "mp4",
       durationSeconds: 80,
+      isMemoryExhaustion: false,
     });
     expect(plan).toEqual({
       workerCount: 5,
@@ -1832,14 +1855,29 @@ describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
       deParallelRouter: "reverted",
     });
   });
+
+  it("drops to a single worker on OOM regardless of the pre-router count (the actual memory remedy)", () => {
+    const plan = resolveParallelRouterRetryPlan({
+      deParallelRouter: "routed",
+      preRouterWorkerCount: 5,
+      cfg,
+      outputFormat: "mp4",
+      durationSeconds: 80,
+      isMemoryExhaustion: true,
+    });
+    expect(plan).toEqual({
+      workerCount: 1,
+      useStreamingEncode: true,
+      deParallelRouter: "reverted",
+    });
+  });
 });
 
-describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic capture failures)", () => {
+describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic capture failures, including OOM)", () => {
   it("always retries a drawElement self-verify failure, pinned or not", () => {
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: true,
-        isMemoryExhaustion: false,
         deWorkerInversion: undefined,
         deParallelRouter: undefined,
       }),
@@ -1850,7 +1888,6 @@ describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic c
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: false,
         deWorkerInversion: undefined,
         deParallelRouter: "routed",
       }),
@@ -1861,7 +1898,6 @@ describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic c
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: false,
         deWorkerInversion: "inverted",
         deParallelRouter: undefined,
       }),
@@ -1872,40 +1908,36 @@ describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic c
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: false,
         deWorkerInversion: undefined,
         deParallelRouter: undefined,
       }),
     ).toBe(false);
   });
 
-  it("does not retry OOM even when the router pinned the worker count", () => {
+  it("retries OOM too when the router pinned the worker count (fallback's Chrome processes are already dead by the time this runs, and the fallback is pooled/lighter than the pinned path)", () => {
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: true,
         deWorkerInversion: undefined,
         deParallelRouter: "routed",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("does not retry OOM even when the inversion pinned the worker count", () => {
+  it("retries OOM too when the inversion pinned the worker count", () => {
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: true,
         deWorkerInversion: "inverted",
         deParallelRouter: undefined,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("does not retry a generic failure on an already-reverted cohort (no pin left to retreat from)", () => {
     expect(
       shouldRetryViaPinnedFallback({
         isVerifyError: false,
-        isMemoryExhaustion: false,
         deWorkerInversion: "reverted",
         deParallelRouter: undefined,
       }),
