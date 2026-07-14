@@ -404,6 +404,14 @@ export function FlatSlider({
             e.currentTarget.releasePointerCapture(e.pointerId);
           }
         }}
+        onLostPointerCapture={() => {
+          // Capture can be lost without either pointerup or pointercancel
+          // firing first (e.g. another element steals it, or the browser
+          // reclaims it for a scroll/touch gesture) — without this,
+          // draggingRef stays stuck true and the knob permanently stops
+          // syncing to the committed value prop.
+          draggingRef.current = false;
+        }}
         onKeyDown={(e) => {
           if (disabled) return;
           const next = sliderKeyTarget(e.key, draft, min, max, step);
@@ -507,6 +515,7 @@ export function FlatSelectRow({
           <select
             value={value}
             disabled={disabled}
+            aria-label={label || undefined}
             onChange={(e) => onChange(e.target.value)}
             className={`appearance-none bg-transparent text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed ${VALUE_TIER_VALUE_CLASS[tier]}`}
           >
@@ -531,8 +540,9 @@ export function FlatSelectRow({
             type="button"
             data-flat-select-reset="true"
             title="Remove — fall back to default"
+            disabled={disabled}
             onClick={onReset}
-            className="flex-shrink-0 text-panel-text-3 opacity-0 transition-opacity hover:text-panel-text-1 group-hover:opacity-100"
+            className="flex-shrink-0 text-panel-text-3 opacity-0 transition-opacity hover:text-panel-text-1 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RotateCcw size={11} />
           </button>

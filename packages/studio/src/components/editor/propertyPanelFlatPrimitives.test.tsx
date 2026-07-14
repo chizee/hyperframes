@@ -774,6 +774,54 @@ describe("FlatSlider — Grade extensions", () => {
     expect(track.getAttribute("aria-valuenow")).toBe("80");
     act(() => root.unmount());
   });
+
+  it("resets the dragging state on lostpointercapture even without a prior pointerup/pointercancel", () => {
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Opacity"
+        value={10}
+        min={0}
+        max={100}
+        tier="explicitCustom"
+        displayValue="10%"
+        onCommit={vi.fn()}
+      />,
+    );
+    const track = host.querySelector<HTMLElement>('[data-flat-slider-track="true"]');
+    if (!track) throw new Error("expected a track element");
+    Object.defineProperty(track, "getBoundingClientRect", {
+      value: () => ({ left: 0, width: 100, top: 0, height: 20, right: 100, bottom: 20 }),
+    });
+    act(() => {
+      track.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, clientX: 30, pointerId: 1 }),
+      );
+    });
+    expect(track.getAttribute("aria-valuenow")).toBe("30");
+    act(() => {
+      // Capture lost WITHOUT a pointerup/pointercancel first — e.g. another
+      // element steals it, or the browser reclaims it for a scroll gesture.
+      track.dispatchEvent(new Event("lostpointercapture", { bubbles: true }));
+    });
+    act(() => {
+      root.render(
+        <FlatSlider
+          label="Opacity"
+          value={99}
+          min={0}
+          max={100}
+          tier="explicitCustom"
+          displayValue="99%"
+          onCommit={vi.fn()}
+        />,
+      );
+    });
+    // If lostpointercapture hadn't cleared the dragging flag, this external
+    // value change would be silently ignored (mid-drag echo suppression)
+    // forever — the knob would be stuck at 30.
+    expect(track.getAttribute("aria-valuenow")).toBe("99");
+    act(() => root.unmount());
+  });
 });
 
 describe("FlatSelectRow", () => {
@@ -810,6 +858,28 @@ describe("FlatSelectRow", () => {
     const reset = host.querySelector<HTMLButtonElement>('[data-flat-select-reset="true"]');
     act(() => reset?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(onReset).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
+
+  it("disables the reset button (and gives the select an accessible name) when the row itself is disabled", () => {
+    const onReset = vi.fn();
+    const { host, root } = renderInto(
+      <FlatSelectRow
+        label="Shadow"
+        value="soft"
+        options={["none", "soft", "lift", "glow"]}
+        tier="explicitCustom"
+        disabled
+        onChange={vi.fn()}
+        onReset={onReset}
+      />,
+    );
+    const select = host.querySelector<HTMLSelectElement>("select");
+    expect(select?.getAttribute("aria-label")).toBe("Shadow");
+    const reset = host.querySelector<HTMLButtonElement>('[data-flat-select-reset="true"]');
+    expect(reset?.disabled).toBe(true);
+    act(() => reset?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onReset).not.toHaveBeenCalled();
     act(() => root.unmount());
   });
 

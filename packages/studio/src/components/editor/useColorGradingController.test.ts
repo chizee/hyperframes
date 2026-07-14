@@ -129,6 +129,30 @@ describe("useColorGradingController", () => {
     vi.useRealTimers();
   });
 
+  it("reverts to the last confirmed-good grading when a persist rejects", async () => {
+    vi.useFakeTimers();
+    const onSetAttributeLive = vi.fn().mockRejectedValue(new Error("disk full"));
+    const { root, getState } = renderHook(onSetAttributeLive);
+    act(() => {
+      getState().commitColorGrading(freshPopGrading());
+    });
+    expect(getState().grading.preset).toBe("fresh-pop");
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    // The rejection settles on a microtask, not a timer — flush it.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Reverted to "neutral" (the last confirmed-good value, from before this
+    // commit) instead of permanently showing "fresh-pop" as if it had saved.
+    expect(getState().grading.preset).toBe("neutral");
+    expect(getState().runtimeStatus.state).toBe("unavailable");
+    act(() => root.unmount());
+    vi.useRealTimers();
+  });
+
   it("resetGrading returns to the neutral preset", () => {
     const { root, getState } = renderHook(vi.fn());
     act(() => {
@@ -159,7 +183,25 @@ describe("useColorGradingController", () => {
     act(() => root.unmount());
   });
 
-  it("cancels a pending persist scheduled for the previous element when selection changes before it flushes", () => {
+  it("also resets when the same local id/selector recurs in a different source file", () => {
+    // Same id, same selector, same selectorIndex — only sourceFile differs.
+    // Without sourceFile in the identity key, this would collide with the
+    // first element (e.g. host composition vs. an inlined sub-composition,
+    // or two unrelated sub-comps that happen to share a local id).
+    const { root, getState, rerenderWithElement } = renderHook(
+      vi.fn(),
+      makeElement({ id: "bg", sourceFile: "index.html" }),
+    );
+    act(() => {
+      getState().commitColorGrading(freshPopGrading());
+    });
+    expect(getState().grading.preset).toBe("fresh-pop");
+    rerenderWithElement(makeElement({ id: "bg", sourceFile: "sub-comp.html" }));
+    expect(getState().grading.preset).toBe("neutral");
+    act(() => root.unmount());
+  });
+
+  it("flushes — rather than discards — a pending persist for the previous element when selection changes before it fires", () => {
     vi.useFakeTimers();
     const onSetAttributeLive = vi.fn();
     const { root, getState, rerenderWithElement } = renderHook(
@@ -169,16 +211,24 @@ describe("useColorGradingController", () => {
     act(() => {
       getState().commitColorGrading(freshPopGrading());
     });
-    // Switch selection before the 350ms debounce flushes — the queued write
-    // targeted the OLD element and must not land on whatever is selected now.
+    // Switch selection before the 350ms debounce fires — the in-flight edit
+    // must be written immediately (targeting the OUTGOING element's own
+    // commit callback), not silently dropped just because a debounce timer
+    // hadn't elapsed yet.
     act(() => {
       vi.advanceTimersByTime(200);
     });
     rerenderWithElement(makeElement({ id: "s2-bg" }));
+    expect(onSetAttributeLive).toHaveBeenCalledTimes(1);
+    const [attr, value] = onSetAttributeLive.mock.calls[0] as [string, string];
+    expect(attr).toBe("color-grading");
+    expect(value).toContain("fresh-pop");
+    // And it must not ALSO fire again once the (now-cleared) original timer
+    // window would have elapsed.
     act(() => {
       vi.advanceTimersByTime(400);
     });
-    expect(onSetAttributeLive).not.toHaveBeenCalled();
+    expect(onSetAttributeLive).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
     vi.useRealTimers();
   });

@@ -189,10 +189,22 @@ export function useColorGradingController({
   const [mediaMetadata, setMediaMetadata] = useState<MediaMetadata | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPersistValueRef = useRef<string | null | undefined>(undefined);
+  const pendingPersistGradingRef = useRef<NormalizedHfColorGrading | null>(null);
+  // The last grading value actually confirmed saved — distinct from `grading`
+  // (the optimistic value shown immediately on commit). A rejected persist
+  // reverts to this instead of leaving the UI permanently showing a value
+  // that was never written.
+  const confirmedGradingRef = useRef(grading);
   const statusTimersRef = useRef<number[]>([]);
   const onSetAttributeLiveRef = useRef(onSetAttributeLive);
   const latestGradingRef = useRef(grading);
   const compareEnabledRef = useRef(compareEnabled);
+  // Captured before reassignment below — still bound to whatever selection
+  // was current on the PREVIOUS render. `commitDataAttribute` (the eventual
+  // callee) closes over `domEditSelection` in its own useCallback deps, so a
+  // selection change mints an entirely new `onSetAttributeLive` closure; this
+  // stale reference is exactly what still targets the outgoing element.
+  const previousOnSetAttributeLive = onSetAttributeLiveRef.current;
   onSetAttributeLiveRef.current = onSetAttributeLive;
   latestGradingRef.current = grading;
   compareEnabledRef.current = compareEnabled;
@@ -214,11 +226,22 @@ export function useColorGradingController({
       clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
     }
+    // Flush — don't discard — a still-pending edit for the OUTGOING element.
+    // Cancelling the debounce without writing would silently drop whatever
+    // the user just changed; targeting it at the callback bound to the OLD
+    // selection (captured above) keeps it from landing on the new element.
+    if (pendingPersistValueRef.current !== undefined) {
+      trackStudioPendingEdit(
+        previousOnSetAttributeLive(COLOR_GRADING_DATA_KEY, pendingPersistValueRef.current),
+      );
+    }
     pendingPersistValueRef.current = undefined;
+    pendingPersistGradingRef.current = null;
     for (const timer of statusTimersRef.current) clearTimeout(timer);
     statusTimersRef.current = [];
     const freshGrading = readColorGradingFromElement(element);
     latestGradingRef.current = freshGrading;
+    confirmedGradingRef.current = freshGrading;
     setGrading(freshGrading);
     setCompareEnabled(false);
     compareEnabledRef.current = false;
@@ -300,11 +323,30 @@ export function useColorGradingController({
     refreshRuntimeStatus();
   }, [refreshRuntimeStatus]);
 
-  const persistColorGradingValue = useCallback((value: string | null) => {
-    return trackStudioPendingEdit(
-      onSetAttributeLiveRef.current(COLOR_GRADING_DATA_KEY, value ?? null),
-    );
-  }, []);
+  const persistColorGradingValue = useCallback(
+    (value: string | null, attemptedGrading: NormalizedHfColorGrading) => {
+      const result = onSetAttributeLiveRef.current(COLOR_GRADING_DATA_KEY, value ?? null);
+      return trackStudioPendingEdit(
+        Promise.resolve(result).then(
+          () => {
+            confirmedGradingRef.current = attemptedGrading;
+          },
+          () => {
+            // Persist failed — the optimistic grading was never actually
+            // saved. Revert to the last confirmed-good value instead of
+            // leaving the control showing an unsaved state as if it succeeded.
+            // Handled here (not rethrown) — nothing downstream awaits this
+            // promise's rejection; callers fire it with `void`.
+            const reverted = confirmedGradingRef.current;
+            latestGradingRef.current = reverted;
+            setGrading(reverted);
+            setRuntimeStatus({ state: "unavailable", message: "Save failed — reverted" });
+          },
+        ),
+      );
+    },
+    [],
+  );
 
   const flushPendingPersist = useCallback(() => {
     if (persistTimerRef.current) {
@@ -313,8 +355,10 @@ export function useColorGradingController({
     }
     if (pendingPersistValueRef.current === undefined) return undefined;
     const value = pendingPersistValueRef.current;
+    const attemptedGrading = pendingPersistGradingRef.current ?? latestGradingRef.current;
     pendingPersistValueRef.current = undefined;
-    return persistColorGradingValue(value);
+    pendingPersistGradingRef.current = null;
+    return persistColorGradingValue(value, attemptedGrading);
   }, [persistColorGradingValue]);
 
   useEffect(() => addStudioPendingEditFlushListener(flushPendingPersist), [flushPendingPersist]);
@@ -399,11 +443,14 @@ export function useColorGradingController({
       pendingPersistValueRef.current = isHfColorGradingActive(nextGrading)
         ? serializeHfColorGrading(nextGrading)
         : null;
+      pendingPersistGradingRef.current = nextGrading;
       persistTimerRef.current = setTimeout(() => {
         const value = pendingPersistValueRef.current;
+        const attemptedGrading = pendingPersistGradingRef.current ?? nextGrading;
         pendingPersistValueRef.current = undefined;
+        pendingPersistGradingRef.current = null;
         persistTimerRef.current = null;
-        void persistColorGradingValue(value ?? null);
+        void persistColorGradingValue(value ?? null, attemptedGrading);
       }, 350);
     },
     [persistColorGradingValue, postColorGrading, postCompare, scheduleRuntimeStatusRefresh],
