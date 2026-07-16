@@ -743,6 +743,18 @@
       // work on this same branch (commits 444639d75, b57b31beb, 6f2e9848c,
       // eba8a0fa2), unrelated to the Grade group (Plan 5) currently landing.
       "packages/studio/src/components/editor/propertyPanelSections.tsx",
+      // Portrait --resolution alias fix (via/resolution-portrait-fix):
+      // server.ts `render` (cyclo 10 / CRAP 31.6) and distributed/plan.ts
+      // `plan` (cyclo 33 / CRAP 36.7) are both pre-existing complexity —
+      // the PR only threads `outputResolutionAspectAgnostic` through the
+      // parseRenderOverrides/RenderInput/DistributedRenderConfig shape and
+      // adds one field spread inside `plan`. Neither function body gained
+      // branches, but the line-shift fingerprint re-flags the inherited
+      // complexity. The new re-target logic itself is extracted into
+      // `adaptAspectAgnosticResolution` in compileStage.ts to keep that
+      // stage's runCompileStage under the cyclo/cognitive thresholds.
+      "packages/producer/src/server.ts",
+      "packages/producer/src/services/distributed/plan.ts",
     ],
   },
 }
