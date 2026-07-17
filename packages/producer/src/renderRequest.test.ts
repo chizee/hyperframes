@@ -146,6 +146,21 @@ describe("RenderRequest", () => {
     }
   });
 
+  it("omits absent optional options while preserving JSON validation for payloads", () => {
+    const value = createRenderRequest({
+      projectDir: "/project",
+      outputPath: "/output/video.mp4",
+      options: {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        gifLoop: undefined,
+      },
+    });
+
+    expect(value.options).not.toHaveProperty("gifLoop");
+  });
+
   it("rejects malformed optional and distributed fields", () => {
     const value = request();
     expect(() =>

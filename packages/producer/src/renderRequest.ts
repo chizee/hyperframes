@@ -204,6 +204,10 @@ function assertNonEmptyPath(value: unknown, field: "projectDir" | "outputPath"):
   }
 }
 
+function omitUndefinedProperties<T extends object>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+}
+
 function assertRenderRequest(value: unknown): asserts value is RenderRequest {
   if (!isPlainObject(value) || value.version !== RENDER_REQUEST_VERSION) {
     const version = isPlainObject(value) ? value.version : undefined;
@@ -232,7 +236,7 @@ export function createRenderRequest(input: CreateRenderRequestInput): RenderRequ
     projectDir: input.projectDir,
     outputPath: input.outputPath,
     options: {
-      ...input.options,
+      ...omitUndefinedProperties(input.options),
       engineConfig: input.engineConfig ?? resolveConfig(input.engineOverrides),
     },
   } satisfies RenderRequest;
