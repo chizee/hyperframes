@@ -76,6 +76,7 @@ import {
   type CapturePerfSummary,
   type CaptureWarning,
   type SubTimelineWaitOutcome,
+  type WorkerSizing,
   resolveBrowserGpuMode,
   resolveHeadlessShellPath,
   applyConcreteGpuScreenshotClamp,
@@ -373,6 +374,14 @@ export interface RenderPerfSummary {
   fps: number;
   quality: string;
   workers: number;
+  /**
+   * Provenance of the auto worker-sizing decision (undefined when the
+   * htmlInCanvas / low-memory pins short-circuited sizing). `boundBy` names
+   * the binding constraint; the heap fields are the advisory budget being
+   * validated by fleet telemetry before enforcement — see
+   * `computeWorkerSizing` in @hyperframes/engine.
+   */
+  workerSizing?: WorkerSizing;
   chunkedEncode: boolean;
   chunkSizeFrames: number | null;
   compositionDurationSeconds: number;
@@ -1703,6 +1712,7 @@ async function executeRenderPipeline(input: {
   // "routed" = the parallel router fired and held; "reverted" = fired but
   // the self-verify retry rolled back; undefined = never fired.
   let deParallelRouter: "routed" | "reverted" | undefined;
+  let workerSizing: WorkerSizing | undefined;
 
   execution.defer("rollback staged artifact", () => artifactTransaction.rollback());
   execution.defer("close file server", () => {
@@ -2475,6 +2485,9 @@ async function executeRenderPipeline(input: {
       compiled,
       log,
       captureCalibration?.estimate,
+      (sizing) => {
+        workerSizing = sizing;
+      },
     );
     // DE priority inversion — see shouldPreferSingleWorkerDrawElement for the
     // policy and benchmark rationale (eligibility resolved above, before
@@ -3281,6 +3294,7 @@ async function executeRenderPipeline(input: {
     const perfSummary = buildRenderPerfSummary({
       job,
       workerCount,
+      workerSizing,
       enableChunkedEncode,
       chunkedEncodeSize,
       compositionDurationSeconds: composition.duration,

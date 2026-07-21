@@ -16,9 +16,11 @@ import {
   type CaptureOptions,
   type CaptureSession,
   type EngineConfig,
+  type WorkerSizing,
   calculateOptimalWorkers,
   captureFrameToBuffer,
   closeCaptureSession,
+  computeWorkerSizing,
   createCaptureSession,
   initializeSession,
 } from "@hyperframes/engine";
@@ -113,6 +115,8 @@ export function resolveRenderWorkerCount(
   compiled: Pick<CompiledComposition, "hasShaderTransitions" | "renderModeHints">,
   log: ProducerLogger = defaultLogger,
   measuredCaptureCost?: CaptureCostEstimate,
+  /** Sink for the sizing provenance so the orchestrator can thread it into telemetry. */
+  onSizing?: (sizing: WorkerSizing) => void,
 ): number {
   // TODO(htmlInCanvas): workaround — Chrome's experimental drawElementImage
   // API (CanvasDrawElement) is non-deterministic across concurrent browser
@@ -144,10 +148,27 @@ export function resolveRenderWorkerCount(
     estimateCaptureCostMultiplier(compiled),
     measuredCaptureCost,
   );
-  const workerCount = calculateOptimalWorkers(totalFrames, requestedWorkers, {
+  const sizing = computeWorkerSizing(totalFrames, requestedWorkers, {
     ...cfg,
     captureCostMultiplier: captureCost.multiplier,
   });
+  onSizing?.(sizing);
+  const workerCount = sizing.workers;
+
+  // Advisory heap check (field OOM, 0.7.66 on 24GB: auto-picked 6 workers
+  // blew Node's default ~4GB heap). Not enforced yet — the budget constant is
+  // derived from one field report; the workers_heap_* telemetry emitted with
+  // this sizing decides whether to enforce. The warning gives the operator
+  // the actionable knobs today.
+  if (sizing.exceedsHeapAdvisory) {
+    log.warn(
+      `[Render] ${workerCount} capture workers may exceed this process's V8 heap ` +
+        `(limit ${sizing.heapLimitMb}MB supports ~${sizing.heapBasedWorkers}). If the render ` +
+        `dies with "JavaScript heap out of memory", raise the heap ` +
+        `(NODE_OPTIONS=--max-old-space-size=8192) or pass --workers ${sizing.heapBasedWorkers}.`,
+      { heapLimitMb: sizing.heapLimitMb, heapBasedWorkers: sizing.heapBasedWorkers },
+    );
+  }
 
   if (requestedWorkers !== undefined || captureCost.multiplier <= 1) {
     return workerCount;
