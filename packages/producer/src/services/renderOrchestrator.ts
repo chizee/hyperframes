@@ -1469,6 +1469,32 @@ export function shouldRetryViaPinnedFallback(args: {
 }
 
 /**
+ * When a self-verify (or pinned-fallback) retry is triggered mid-capture, the
+ * caller may still hold a live probe session that the failed stage was passed
+ * but did not (or could not) close in its own `finally` before it threw. Left
+ * behind, that session's Chrome process orphans until the containing render
+ * exits — precisely when we are recovering from GPU/memory pressure and can
+ * least afford an unaccounted Chrome. Close it before the caller clears its
+ * reference; swallow any close error with a warn so the retry itself is never
+ * derailed by a shutdown hiccup.
+ */
+export async function closeOrphanedProbeForRetry(
+  probe: CaptureSession,
+  closer: (session: CaptureSession) => Promise<void>,
+  log: Pick<ProducerLogger, "warn">,
+  retryContext: string,
+): Promise<void> {
+  try {
+    await closer(probe);
+  } catch (closeErr) {
+    log.warn(
+      `[Render] probe close before ${retryContext} retry failed; continuing with retry`,
+      { error: closeErr instanceof Error ? closeErr.message : String(closeErr) },
+    );
+  }
+}
+
+/**
  * Parallel-streaming router for NON-drawElement capture (screenshot on
  * macOS/Windows/forced-screenshot, BeginFrame on Linux): should this
  * multi-worker render stream captured frame buffers straight into the single
@@ -3090,7 +3116,16 @@ async function executeRenderPipeline(input: {
             deWorkerInversion,
             deParallelRouter,
           });
-          probeSession = null;
+          // Streaming stage aims to close the probe in its own finally; if it
+          // threw before doing so, the Chrome process would orphan through the
+          // pinned-fallback retry. Close defensively before we release the
+          // reference — see closeOrphanedProbeForRetry.
+          if (probeSession) {
+            lastBrowserConsole = probeSession.browserConsoleBuffer;
+            const orphaned = probeSession;
+            probeSession = null;
+            await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "streaming");
+          }
           if (failedRouting === "worker_inversion") {
             // The inversion bet on drawElement and lost — re-render on the
             // pre-inversion parallel screenshot path instead of single-worker
@@ -3243,7 +3278,17 @@ async function executeRenderPipeline(input: {
           resetCaptureAttemptProgress(job);
           dedupPerfs.length = 0;
           cfg.useDrawElement = false;
-          probeSession = null;
+          // Same shape as the streaming retry above: `runCaptureStage` was
+          // passed the probe and threw before it could close it, so we must
+          // release the Chrome process ourselves before starting the
+          // screenshot-baseline retry — otherwise it orphans until render
+          // exit. See closeOrphanedProbeForRetry.
+          if (probeSession) {
+            lastBrowserConsole = probeSession.browserConsoleBuffer;
+            const orphaned = probeSession;
+            probeSession = null;
+            await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "disk verify");
+          }
           capturePlan = replanAfterFailure(capturePlan, { kind: "draw_element_verification" });
           syncCapturePlan();
           updateCaptureObservability({
