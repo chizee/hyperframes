@@ -238,9 +238,13 @@
         var brand = (data && data.brand) || {};
         if (typeof brand.primaryColor === "string" && brand.primaryColor) {
           root.style.setProperty("--hf-caption-primary", brand.primaryColor);
+        } else {
+          root.style.removeProperty("--hf-caption-primary");
         }
         if (typeof brand.accentColor === "string" && brand.accentColor) {
           root.style.setProperty("--hf-caption-accent", brand.accentColor);
+        } else {
+          root.style.removeProperty("--hf-caption-accent");
         }
         return { W: W, H: H, scaleX: W / 1920, scaleY: H / 1080, fontScale: Math.min(W, H) / 1080 };
       }
